@@ -1,0 +1,4 @@
+Provider_Type,Row_Count,Mean_Gap_Pct,Reason_Excluded
+Ambulatory Surgical Center,56882,339.07,"Uses ASC Payment System or bundled facility rates, not Physician Fee Schedule RVU formula"
+Nuclear Medicine,6985,182.4,"Uses ASC Payment System or bundled facility rates, not Physician Fee Schedule RVU formula"
+Independent Diagnostic Testing Facility (IDTF),29945,70.45,"Uses ASC Payment System or bundled facility rates, not Physician Fee Schedule RVU formula"

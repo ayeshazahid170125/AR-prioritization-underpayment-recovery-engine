@@ -1,0 +1,7 @@
+Metric,Value
+Rows before cleaning,9613174
+Rows excluded - zero expected payment,1841271
+Rows excluded - invalid allowed amount,0
+Rows in final cleaned dataset,7771903
+Rows flagged for review (kept),946234
+Rows flagged as duplicate key,0

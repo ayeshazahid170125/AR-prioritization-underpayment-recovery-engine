@@ -1,0 +1,10 @@
+metric,value
+total_modeling_rows,7678091
+underpaid_queue_rows,6056133
+model_used,LGBMClassifier
+model_scored_rows,6056133
+rule_fallback_rows,0
+total_estimated_recovery,14993979972.64
+total_priority_score,10411403874.7
+critical_tier_rows,8609
+high_tier_rows,162776

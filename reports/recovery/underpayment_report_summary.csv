@@ -1,0 +1,13 @@
+metric,value
+total_underpaid_rows,6056133
+total_estimated_recovery,14993979972.64
+critical_tier_rows,8609
+high_tier_rows,162776
+top_state_by_recovery,CA
+top_state_recovery_amount,1370413568.2
+top_hcpcs_by_recovery,66984
+top_hcpcs_recovery_amount,2208985130.83
+top_provider_type_by_recovery,Diagnostic Radiology
+unique_hcpcs_codes,3764
+unique_states,53
+unique_provider_types,107

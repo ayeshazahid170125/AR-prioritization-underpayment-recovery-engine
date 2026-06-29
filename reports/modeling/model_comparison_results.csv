@@ -1,0 +1,6 @@
+Model,Mean_PR_AUC,Std_PR_AUC,Mean_ROC_AUC,Mean_F1
+LightGBM,0.8688,0.0014,0.8791,0.7479
+Hist_Gradient_Boosting,0.8663,0.0015,0.8771,0.7622
+Random_Forest,0.8561,0.0016,0.8653,0.7449
+Gradient_Boosting,0.8546,0.0014,0.8639,0.7284
+Logistic_Regression,0.6921,0.004,0.7078,0.606

@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Raw CMS and fee schedule source files
+Medicare Physician & Other Practitioners - by Provider and Service/
+RVU23A/
+data/
+*.xlsx
+*.xls
+*.pdf
+
+# Heavy generated datasets and model artifacts
+*_outputs/
+model_outputs/
+*.pkl
+*.joblib
+
+# Keep curated docs/reports tracked
+!reports/
+!docs/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,10 @@
+Column,Dtype,Null_Type,Flag_Category,Count,Percentage
+Avg_Mdcr_Alowd_Amt,float64,Zero (0) values - review only,Review Only,18,0.0
+Avg_Mdcr_Pymt_Amt,float64,Zero (0) values - review only,Review Only,94,0.0
+Expected_Payment_NonFacility_Avg,float64,Zero (0) values - review only,Review Only,1841271,19.15
+Expected_Payment_Facility_Avg,float64,Zero (0) values - review only,Review Only,1841271,19.15
+Expected_Payment_Used,float64,Zero (0) values - review only,Review Only,1841271,19.15
+Payment_Gap,float64,Negative values - review only,Review Only,6071170,63.15
+Payment_Gap_Pct,float64,Negative values - review only,Review Only,6071170,63.15
+Payment_Gap_Pct,float64,Inf / -Inf,Null / Missing,1841271,19.15
+Total_Dollar_Gap,float64,Negative values - review only,Review Only,6071170,63.15

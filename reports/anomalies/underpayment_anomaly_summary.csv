@@ -1,0 +1,9 @@
+metric,value
+input_rows,7678091
+total_groups_formed,391005
+groups_scored_min_rows,20
+groups_scored,57308
+anomaly_patterns,5491
+anomaly_rate_pct,9.5816
+contamination_setting,auto
+grouping_columns,"Rndrng_Prvdr_State_Abrvtn, Rndrng_Prvdr_Type, HCPCS_Cd, Place_Of_Srvc"

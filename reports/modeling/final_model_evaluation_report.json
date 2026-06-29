@@ -1,0 +1,52 @@
+{
+  "best_model": "LightGBM",
+  "best_params": {
+    "learning_rate": "0.1",
+    "max_depth": "10",
+    "n_estimators": "200"
+  },
+  "cv_comparison": [
+    {
+      "Model": "LightGBM",
+      "Mean_PR_AUC": 0.8688,
+      "Std_PR_AUC": 0.0014,
+      "Mean_ROC_AUC": 0.8791,
+      "Mean_F1": 0.7479
+    },
+    {
+      "Model": "Hist_Gradient_Boosting",
+      "Mean_PR_AUC": 0.8663,
+      "Std_PR_AUC": 0.0015,
+      "Mean_ROC_AUC": 0.8771,
+      "Mean_F1": 0.7622
+    },
+    {
+      "Model": "Random_Forest",
+      "Mean_PR_AUC": 0.8561,
+      "Std_PR_AUC": 0.0016,
+      "Mean_ROC_AUC": 0.8653,
+      "Mean_F1": 0.7449
+    },
+    {
+      "Model": "Gradient_Boosting",
+      "Mean_PR_AUC": 0.8546,
+      "Std_PR_AUC": 0.0014,
+      "Mean_ROC_AUC": 0.8639,
+      "Mean_F1": 0.7284
+    },
+    {
+      "Model": "Logistic_Regression",
+      "Mean_PR_AUC": 0.6921,
+      "Std_PR_AUC": 0.004,
+      "Mean_ROC_AUC": 0.7078,
+      "Mean_F1": 0.606
+    }
+  ],
+  "final_test_pr_auc": 0.8754,
+  "final_test_roc_auc": 0.8857,
+  "final_test_f1": 0.7577,
+  "uses_scaling": false,
+  "n_features": 23,
+  "training_rows": 6142472,
+  "test_rows": 1535619
+}

@@ -6,7 +6,7 @@
 
 This project estimates expected Medicare payment, compares it against actual allowed/payment amounts, identifies likely underpayment variance, and ranks claims for AR recovery review.
 
-## Business Goal
+## Goal
 
 Help Revenue Cycle teams prioritize underpaid claims by estimated recovery value, severity, and model confidence. The system is designed as a portfolio proof of concept using public CMS data, not as a production payer-contract adjudication engine.
 

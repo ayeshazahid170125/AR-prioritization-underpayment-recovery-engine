@@ -105,9 +105,3 @@ Isolation Forest was used to find unusual underpayment patterns across state, pr
 - Streamlit dashboard: `app/step13_dashboard.py`
 - Local launcher: `run_app.ps1`
 
-## Limitations
-
-- Public CMS data does not include actual payer contract adjudication or appeal recovery outcomes.
-- Expected-payment logic is based on public fee schedule references and proxy assumptions.
-- The model predicts recovery priority, not guaranteed recoverability.
-- Production use would require payer contract terms, remittance records, denial/appeal outcomes, and compliance review.

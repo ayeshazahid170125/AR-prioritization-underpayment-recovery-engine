@@ -41,7 +41,10 @@ SUMMARY_PATH = OUTPUT_DIR / "underpayment_anomaly_summary.csv"
 
 GROUP_COLUMNS = ["Rndrng_Prvdr_State_Abrvtn", "Rndrng_Prvdr_Type", "HCPCS_Cd", "Place_Of_Srvc"]
 MIN_GROUP_ROWS = 20
-CONTAMINATION = "auto"  # let sklearn estimate; override with a float if needed
+# Flag roughly the top 10% most unusual grouped underpayment patterns.
+# This is more reviewer-friendly than sklearn's "auto" threshold because the
+# review volume is explicit and reproducible.
+CONTAMINATION = 0.10
 NUMERIC_FEATURES = [
     "row_count",
     "underpaid_rate",
@@ -62,7 +65,10 @@ def print_section(title):
 # LOAD DATA
 # ============================================================
 print_section("LOAD modeling_dataset.csv")
-df = pd.read_csv(INPUT_PATH, low_memory=False)
+required_cols = GROUP_COLUMNS + [
+    "Is_Underpaid", "Total_Dollar_Gap", "Payment_Gap_Pct", "Tot_Srvcs",
+]
+df = pd.read_csv(INPUT_PATH, usecols=required_cols, low_memory=True)
 print(f"Loaded: {df.shape[0]:,} rows x {df.shape[1]} columns")
 
 for col in GROUP_COLUMNS:
@@ -183,8 +189,8 @@ print(f"Saved: {SUMMARY_PATH}")
 print_section("STEP 10 COMPLETE")
 print(summary.to_string(index=False))
 print("""
-Next: Step 11 will train an actual regression model for expected
-reimbursement (CPT target encoding + multiple regressors compared), to
-satisfy the brief's "regression" wording alongside the Step 02 CMS-formula
-benchmark.
+Next: Step 11 will build the business underpayment report. Step 14 provides
+the supplementary regression validation layer for the project brief's
+"regression" requirement while keeping the CMS fee schedule formula as the
+primary benchmark.
 """)

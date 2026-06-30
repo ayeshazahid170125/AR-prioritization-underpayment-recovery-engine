@@ -217,6 +217,52 @@ print(f"services_per_beneficiary -- mean: {df['services_per_beneficiary'].mean()
 
 
 # ============================================================
+# FEATURE 7 - LEAKAGE-SAFE CONTEXT FEATURES
+# ============================================================
+print_section("FEATURE 7 - LEAKAGE-SAFE CONTEXT FEATURES")
+print("""
+We add provider/code/geography context features that do NOT use
+Payment_Gap, Payment_Gap_Pct, Total_Dollar_Gap, Is_Underpaid, expected
+payment, allowed amount, or Medicare payment amount. This keeps the model
+from learning the answer key while still giving it useful utilization and
+market-pattern signals.
+""")
+
+df["provider_row_count"] = df.groupby("Rndrng_NPI")["HCPCS_Cd"].transform("size")
+df["provider_total_services"] = df.groupby("Rndrng_NPI")["Tot_Srvcs"].transform("sum")
+df["hcpcs_row_count"] = df.groupby("HCPCS_Cd")["Rndrng_NPI"].transform("size")
+df["hcpcs_total_services"] = df.groupby("HCPCS_Cd")["Tot_Srvcs"].transform("sum")
+df["state_row_count"] = df.groupby("Rndrng_Prvdr_State_Abrvtn")["HCPCS_Cd"].transform("size")
+df["state_total_services"] = df.groupby("Rndrng_Prvdr_State_Abrvtn")["Tot_Srvcs"].transform("sum")
+
+state_hcpcs_rows = df.groupby(
+    ["Rndrng_Prvdr_State_Abrvtn", "HCPCS_Cd"]
+)["Rndrng_NPI"].transform("size")
+df["hcpcs_state_row_share"] = (
+    state_hcpcs_rows / df["state_row_count"].replace(0, np.nan)
+).fillna(0)
+
+df["avg_charge_per_beneficiary"] = (
+    df["Avg_Sbmtd_Chrg"] * df["Tot_Srvcs"] / df["Tot_Benes"].replace(0, np.nan)
+).fillna(0)
+df["provider_service_share"] = (
+    df["Tot_Srvcs"] / df["provider_total_services"].replace(0, np.nan)
+).fillna(0)
+df["hcpcs_service_share_in_state"] = (
+    df["Tot_Srvcs"] / df["state_total_services"].replace(0, np.nan)
+).fillna(0)
+
+for col in [
+    "provider_row_count", "provider_total_services", "hcpcs_row_count",
+    "hcpcs_total_services", "state_row_count", "state_total_services",
+    "avg_charge_per_beneficiary",
+]:
+    new_col = f"{col}_log"
+    df[new_col] = np.log1p(df[col].clip(lower=0))
+    print(f"  added {col} and {new_col}")
+
+
+# ============================================================
 # SAVE FEATURE-ENGINEERED DATASET
 # ============================================================
 print_section("SAVING FEATURE-ENGINEERED DATASET")
@@ -239,7 +285,21 @@ card = """# Feature Definition Card -- Project 2 Collection Model
 ## Engineered Features
 - procedure_category: derived from official CPT/HCPCS numeric code ranges
 - services_per_beneficiary: Tot_Srvcs / Tot_Benes (utilization intensity signal)
+- provider/state/HCPCS context features: row counts, service totals, and
+  service shares based only on volume, charge, code, provider, state, and
+  place-of-service information.
 - *_log: log1p transforms of skewed numeric fields
+
+## Leakage-Avoided Feature Ideas
+The following tempting features are intentionally NOT added because the
+target is built from payment variance:
+- provider_avg_gap_pct
+- hcpcs_historic_underpaid_rate
+- state_avg_gap_pct
+- charge_to_expected_ratio
+
+They use Payment_Gap_Pct, Is_Underpaid, or Expected_Payment_Used, which
+would leak target ingredients back into the model.
 
 ## Documented Proxies (IMPORTANT LIMITATION)
 - payer_type_proxy: derived from Medicare participation status only.

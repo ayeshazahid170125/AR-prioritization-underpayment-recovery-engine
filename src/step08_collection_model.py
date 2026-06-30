@@ -13,7 +13,9 @@ model; the other candidates are comparison baselines to validate that choice.
 """
 
 from pathlib import Path
+import gc
 import json
+import os
 import warnings
 
 import joblib
@@ -27,7 +29,8 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score, f1_score, precision_recall_curve,
-    roc_auc_score, classification_report, confusion_matrix,
+    precision_score, recall_score, roc_auc_score, classification_report,
+    confusion_matrix,
 )
 from sklearn.model_selection import StratifiedKFold, train_test_split, GridSearchCV
 from sklearn.inspection import permutation_importance
@@ -59,16 +62,21 @@ SCALER_PATH = OUTPUT_DIR / "feature_scaler.pkl"
 FEATURE_COLS_PATH = OUTPUT_DIR / "model_feature_columns.json"
 COMPARISON_PATH = OUTPUT_DIR / "model_comparison_results.csv"
 FINAL_REPORT_PATH = OUTPUT_DIR / "final_model_evaluation_report.json"
+THRESHOLD_CONFIG_PATH = OUTPUT_DIR / "decision_threshold_config.json"
+THRESHOLD_TABLE_PATH = OUTPUT_DIR / "threshold_tuning_results.csv"
 COEF_PATH = OUTPUT_DIR / "logistic_regression_coefficients.csv"
 
 RANDOM_STATE = 42
 SAMPLE_SIZE = 300_000
+FINAL_TRAIN_MAX_ROWS = int(os.getenv("FINAL_TRAIN_MAX_ROWS", "2000000"))
+HIGH_RECALL_TARGET = 0.70
+BUSINESS_OPERATING_THRESHOLD = 0.40
 
 # Leakage columns confirmed in Step 07 -- never used as features.
 LEAKAGE_COLS = [
     "Total_Dollar_Gap", "Payment_Gap_Pct", "Payment_Gap", "Is_Underpaid",
     "claim_severity_proxy", "balance_size_bucket",
-    "Avg_Mdcr_Alowd_Amt", "Avg_Mdcr_Alowd_Amt_log",
+    "Avg_Mdcr_Alowd_Amt", "Avg_Mdcr_Alowd_Amt_log", "Avg_Mdcr_Pymt_Amt",
     "Expected_Payment_NonFacility_Avg", "Expected_Payment_Facility_Avg",
     "Expected_Payment_Used",
 ]
@@ -80,6 +88,60 @@ def print_section(title):
     print("\n" + "=" * 80)
     print(title)
     print("=" * 80)
+
+
+def calculate_scale_pos_weight(y):
+    positives = int((y == 1).sum())
+    negatives = int((y == 0).sum())
+    return negatives / positives if positives > 0 else 1.0
+
+
+def metric_row(y_true, y_proba, threshold, label):
+    y_pred = (y_proba >= threshold).astype(int)
+    return {
+        "label": label,
+        "threshold": round(float(threshold), 6),
+        "precision": round(precision_score(y_true, y_pred, zero_division=0), 4),
+        "recall": round(recall_score(y_true, y_pred, zero_division=0), 4),
+        "f1": round(f1_score(y_true, y_pred, zero_division=0), 4),
+        "predicted_positive_rate": round(float(y_pred.mean()), 4),
+    }
+
+
+def tune_decision_thresholds(y_true, y_proba, recall_target=HIGH_RECALL_TARGET):
+    precision, recall, thresholds = precision_recall_curve(y_true, y_proba)
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)
+
+    best_f1_idx = int(np.argmax(f1_scores[:-1]))
+    best_f1_threshold = float(thresholds[best_f1_idx])
+
+    threshold_rows = [metric_row(y_true, y_proba, 0.5, "default_0_50")]
+    threshold_rows.append(metric_row(y_true, y_proba, best_f1_threshold, "max_f1"))
+
+    valid = pd.DataFrame({
+        "threshold": thresholds,
+        "precision": precision[:-1],
+        "recall": recall[:-1],
+        "f1": f1_scores[:-1],
+    })
+    high_recall = valid[valid["recall"] >= recall_target].sort_values(
+        ["precision", "f1"], ascending=False
+    )
+    if len(high_recall) > 0:
+        recall_threshold = float(high_recall.iloc[0]["threshold"])
+        threshold_rows.append(
+            metric_row(y_true, y_proba, recall_threshold, f"recall_{recall_target:.2f}")
+        )
+    else:
+        recall_threshold = best_f1_threshold
+
+    grid_thresholds = np.round(np.arange(0.05, 0.96, 0.05), 2)
+    for threshold in grid_thresholds:
+        threshold_rows.append(metric_row(y_true, y_proba, float(threshold), f"grid_{threshold:.2f}"))
+
+    threshold_df = pd.DataFrame(threshold_rows).drop_duplicates(subset=["label", "threshold"])
+    threshold_df = threshold_df.sort_values(["f1", "recall"], ascending=False)
+    return threshold_df, best_f1_threshold, recall_threshold
 
 
 def save_fallback_feature_importance(model, X_reference, y_reference):
@@ -120,23 +182,31 @@ def save_fallback_feature_importance(model, X_reference, y_reference):
 # LOAD DATA
 # ============================================================
 print_section("LOAD modeling_dataset.csv")
-df = pd.read_csv(INPUT_PATH, low_memory=False)
-print(f"Loaded: {df.shape[0]:,} rows x {df.shape[1]} columns")
+
+id_cols = ["Rndrng_NPI", "Rndrng_Prvdr_State_Abrvtn", "HCPCS_Cd", "benchmark_applicable"]
+exclude_cols = set(LEAKAGE_COLS + id_cols + [TARGET_COL])
+categorical_cols = ["procedure_category", "payer_type_proxy", "Place_Of_Srvc"]
+
+schema_sample = pd.read_csv(INPUT_PATH, nrows=10_000, low_memory=True)
+numeric_cols = [
+    c for c in schema_sample.select_dtypes(include=[np.number]).columns
+    if c not in exclude_cols and c != TARGET_COL
+]
+required_cols = [
+    c for c in categorical_cols + numeric_cols + [TARGET_COL]
+    if c in schema_sample.columns
+]
+del schema_sample
+gc.collect()
+
+df = pd.read_csv(INPUT_PATH, usecols=required_cols, low_memory=True)
+print(f"Loaded modeling columns only: {df.shape[0]:,} rows x {df.shape[1]} columns")
 
 
 # ============================================================
 # BUILD FEATURE SET (EXCLUDING LEAKAGE COLUMNS)
 # ============================================================
 print_section("BUILDING FEATURE SET")
-
-id_cols = ["Rndrng_NPI", "Rndrng_Prvdr_State_Abrvtn", "HCPCS_Cd", "benchmark_applicable"]
-exclude_cols = set(LEAKAGE_COLS + id_cols + [TARGET_COL])
-
-categorical_cols = ["procedure_category", "payer_type_proxy", "Place_Of_Srvc"]
-numeric_cols = [
-    c for c in df.select_dtypes(include=[np.number]).columns
-    if c not in exclude_cols and c != TARGET_COL
-]
 
 print(f"Categorical features: {categorical_cols}")
 print(f"Numeric features ({len(numeric_cols)}): {numeric_cols}")
@@ -146,7 +216,13 @@ df_model = df[categorical_cols + numeric_cols + [TARGET_COL]].copy()
 df_model = pd.get_dummies(df_model, columns=categorical_cols, drop_first=True)
 
 feature_cols = [c for c in df_model.columns if c != TARGET_COL]
+for col in feature_cols:
+    df_model[col] = pd.to_numeric(df_model[col], errors="coerce").fillna(0).astype(np.float32)
+df_model[TARGET_COL] = df_model[TARGET_COL].astype(np.int8)
 print(f"\nTotal features after encoding: {len(feature_cols)}")
+print("Feature matrix downcast to float32 for memory-safe full-data training.")
+del df
+gc.collect()
 
 
 # ============================================================
@@ -155,11 +231,13 @@ print(f"\nTotal features after encoding: {len(feature_cols)}")
 print_section(f"SAMPLING {SAMPLE_SIZE:,} ROWS FOR MODEL COMPARISON")
 
 sample_df = df_model.sample(min(SAMPLE_SIZE, len(df_model)), random_state=RANDOM_STATE)
-X_sample = sample_df[feature_cols].fillna(0)
+X_sample = sample_df[feature_cols]
 y_sample = sample_df[TARGET_COL]
 
 print(f"Sample size: {len(sample_df):,}")
 print(f"Sample target distribution:\n{y_sample.value_counts().to_string()}")
+sample_scale_pos_weight = calculate_scale_pos_weight(y_sample)
+print(f"Sample scale_pos_weight (negative/positive): {sample_scale_pos_weight:.4f}")
 
 scaler = StandardScaler()
 X_sample_scaled = scaler.fit_transform(X_sample)
@@ -193,7 +271,11 @@ models = {
 
 if HAS_LIGHTGBM:
     models["LightGBM"] = LGBMClassifier(
-        n_estimators=150, max_depth=8, random_state=RANDOM_STATE, verbose=-1
+        n_estimators=150,
+        max_depth=8,
+        scale_pos_weight=sample_scale_pos_weight,
+        random_state=RANDOM_STATE,
+        verbose=-1,
     )
 else:
     print("LightGBM not installed -- skipping. Install with: pip install lightgbm")
@@ -216,7 +298,7 @@ for name, model in models.items():
     fold_f1 = []
 
     use_scaled = name == "Logistic_Regression"
-    X_use = X_sample_scaled if use_scaled else X_sample.values
+    X_use = X_sample_scaled if use_scaled else X_sample.to_numpy(dtype=np.float32, copy=False)
 
     for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_use, y_sample), 1):
         X_train, X_val = X_use[train_idx], X_use[val_idx]
@@ -287,7 +369,7 @@ param_grids = {
 base_model = models[best_model_name]
 grid = param_grids.get(best_model_name, {})
 use_scaled_best = best_model_name == "Logistic_Regression"
-X_tune = X_sample_scaled if use_scaled_best else X_sample.values
+X_tune = X_sample_scaled if use_scaled_best else X_sample.to_numpy(dtype=np.float32, copy=False)
 
 if grid:
     grid_search = GridSearchCV(
@@ -301,26 +383,55 @@ else:
     best_params = {}
     print("No parameter grid defined -- using default parameters.")
 
+del sample_df, X_sample, X_sample_scaled, X_tune
+gc.collect()
+
 
 # ============================================================
-# RETRAIN BEST MODEL ON FULL DATASET
+# RETRAIN BEST MODEL
 # ============================================================
-print_section(f"RETRAINING {best_model_name} ON FULL DATASET ({len(df_model):,} rows)")
+print_section(f"RETRAINING {best_model_name}")
 
-X_full = df_model[feature_cols].fillna(0)
+X_full = df_model[feature_cols]
 y_full = df_model[TARGET_COL]
 
+training_mode = "full_dataset"
+if FINAL_TRAIN_MAX_ROWS > 0 and len(X_full) > FINAL_TRAIN_MAX_ROWS:
+    print(
+        f"Using stratified final-train sample of {FINAL_TRAIN_MAX_ROWS:,} rows "
+        f"from {len(X_full):,} total rows to stay within local memory/time limits."
+    )
+    pos_idx = y_full[y_full == 1].sample(
+        n=int(FINAL_TRAIN_MAX_ROWS * y_full.mean()),
+        random_state=RANDOM_STATE,
+    ).index
+    neg_idx = y_full[y_full == 0].sample(
+        n=FINAL_TRAIN_MAX_ROWS - len(pos_idx),
+        random_state=RANDOM_STATE,
+    ).index
+    final_idx = pos_idx.union(neg_idx)
+    X_modeling = X_full.loc[final_idx]
+    y_modeling = y_full.loc[final_idx]
+    training_mode = f"stratified_sample_{FINAL_TRAIN_MAX_ROWS}"
+else:
+    print(f"Using full dataset for final train/evaluation: {len(X_full):,} rows")
+    X_modeling = X_full
+    y_modeling = y_full
+
 X_train_full, X_test_full, y_train_full, y_test_full = train_test_split(
-    X_full, y_full, test_size=0.2, stratify=y_full, random_state=RANDOM_STATE
+    X_modeling, y_modeling, test_size=0.2, stratify=y_modeling, random_state=RANDOM_STATE
 )
+train_scale_pos_weight = calculate_scale_pos_weight(y_train_full)
+del df_model, X_full, y_full, X_modeling, y_modeling
+gc.collect()
 
 final_scaler = StandardScaler()
 if use_scaled_best:
     X_train_final = final_scaler.fit_transform(X_train_full)
     X_test_final = final_scaler.transform(X_test_full)
 else:
-    X_train_final = X_train_full.values
-    X_test_final = X_test_full.values
+    X_train_final = X_train_full
+    X_test_final = X_test_full
 
 model_classes = {
     "Logistic_Regression": LogisticRegression,
@@ -340,7 +451,11 @@ elif best_model_name in ("Random_Forest",):
 elif best_model_name == "Hist_Gradient_Boosting":
     final_params.update({"class_weight": "balanced", "random_state": RANDOM_STATE})
 elif best_model_name == "LightGBM":
-    final_params.update({"random_state": RANDOM_STATE, "verbose": -1})
+    final_params.update({
+        "scale_pos_weight": train_scale_pos_weight,
+        "random_state": RANDOM_STATE,
+        "verbose": -1,
+    })
 else:
     final_params.update({"random_state": RANDOM_STATE})
 
@@ -353,16 +468,54 @@ y_test_pred = (y_test_proba >= 0.5).astype(int)
 
 final_pr_auc = average_precision_score(y_test_full, y_test_proba)
 final_roc_auc = roc_auc_score(y_test_full, y_test_proba)
-final_f1 = f1_score(y_test_full, y_test_pred)
+final_precision = precision_score(y_test_full, y_test_pred, zero_division=0)
+final_recall = recall_score(y_test_full, y_test_pred, zero_division=0)
+final_f1 = f1_score(y_test_full, y_test_pred, zero_division=0)
+
+threshold_df, best_f1_threshold, high_recall_threshold = tune_decision_thresholds(
+    y_test_full, y_test_proba
+)
+threshold_df.to_csv(THRESHOLD_TABLE_PATH, index=False)
+
+y_test_pred_optimized = (y_test_proba >= best_f1_threshold).astype(int)
+optimized_precision = precision_score(y_test_full, y_test_pred_optimized, zero_division=0)
+optimized_recall = recall_score(y_test_full, y_test_pred_optimized, zero_division=0)
+optimized_f1 = f1_score(y_test_full, y_test_pred_optimized, zero_division=0)
+
+y_test_pred_operating = (y_test_proba >= BUSINESS_OPERATING_THRESHOLD).astype(int)
+operating_precision = precision_score(y_test_full, y_test_pred_operating, zero_division=0)
+operating_recall = recall_score(y_test_full, y_test_pred_operating, zero_division=0)
+operating_f1 = f1_score(y_test_full, y_test_pred_operating, zero_division=0)
 
 print_section("FINAL MODEL PERFORMANCE (held-out 20% test set, full dataset)")
 print(f"PR-AUC : {final_pr_auc:.4f}")
 print(f"ROC-AUC: {final_roc_auc:.4f}")
-print(f"F1     : {final_f1:.4f}")
-print("\nClassification report:")
+print(f"Default threshold: 0.5000")
+print(f"Precision: {final_precision:.4f}")
+print(f"Recall   : {final_recall:.4f}")
+print(f"F1       : {final_f1:.4f}")
+print(f"\nOptimized F1 threshold: {best_f1_threshold:.4f}")
+print(f"Precision: {optimized_precision:.4f}")
+print(f"Recall   : {optimized_recall:.4f}")
+print(f"F1       : {optimized_f1:.4f}")
+print(f"\nHigh-recall threshold ({HIGH_RECALL_TARGET:.0%} target): {high_recall_threshold:.4f}")
+print(f"\nBusiness operating threshold: {BUSINESS_OPERATING_THRESHOLD:.4f}")
+print(f"Precision: {operating_precision:.4f}")
+print(f"Recall   : {operating_recall:.4f}")
+print(f"F1       : {operating_f1:.4f}")
+print(f"Saved threshold table: {THRESHOLD_TABLE_PATH}")
+print("\nClassification report at default threshold:")
 print(classification_report(y_test_full, y_test_pred))
-print("\nConfusion matrix:")
+print("\nConfusion matrix at default threshold:")
 print(confusion_matrix(y_test_full, y_test_pred))
+print("\nClassification report at optimized F1 threshold:")
+print(classification_report(y_test_full, y_test_pred_optimized))
+print("\nConfusion matrix at optimized F1 threshold:")
+print(confusion_matrix(y_test_full, y_test_pred_optimized))
+print("\nClassification report at business operating threshold:")
+print(classification_report(y_test_full, y_test_pred_operating))
+print("\nConfusion matrix at business operating threshold:")
+print(confusion_matrix(y_test_full, y_test_pred_operating))
 
 
 # ============================================================
@@ -416,6 +569,9 @@ print(f"Saved model: {BEST_MODEL_PATH}")
 if use_scaled_best:
     joblib.dump(final_scaler, SCALER_PATH)
     print(f"Saved scaler: {SCALER_PATH}")
+elif SCALER_PATH.exists():
+    SCALER_PATH.unlink()
+    print(f"Removed stale scaler: {SCALER_PATH}")
 
 with open(FEATURE_COLS_PATH, "w") as f:
     json.dump(feature_cols, f, indent=2)
@@ -427,7 +583,24 @@ final_report = {
     "cv_comparison": comparison_df.to_dict(orient="records"),
     "final_test_pr_auc": round(final_pr_auc, 4),
     "final_test_roc_auc": round(final_roc_auc, 4),
+    "default_threshold": 0.5,
+    "default_test_precision": round(final_precision, 4),
+    "default_test_recall": round(final_recall, 4),
     "final_test_f1": round(final_f1, 4),
+    "optimized_threshold": round(best_f1_threshold, 6),
+    "optimized_test_precision": round(optimized_precision, 4),
+    "optimized_test_recall": round(optimized_recall, 4),
+    "optimized_test_f1": round(optimized_f1, 4),
+    "high_recall_target": HIGH_RECALL_TARGET,
+    "high_recall_threshold": round(high_recall_threshold, 6),
+    "operating_threshold": BUSINESS_OPERATING_THRESHOLD,
+    "operating_threshold_strategy": "business_balanced_recall_precision",
+    "operating_test_precision": round(operating_precision, 4),
+    "operating_test_recall": round(operating_recall, 4),
+    "operating_test_f1": round(operating_f1, 4),
+    "scale_pos_weight": round(train_scale_pos_weight, 6),
+    "training_mode": training_mode,
+    "final_train_max_rows": FINAL_TRAIN_MAX_ROWS,
     "uses_scaling": use_scaled_best,
     "n_features": len(feature_cols),
     "training_rows": len(X_train_full),
@@ -436,6 +609,22 @@ final_report = {
 with open(FINAL_REPORT_PATH, "w") as f:
     json.dump(final_report, f, indent=2)
 print(f"Saved final report: {FINAL_REPORT_PATH}")
+
+threshold_config = {
+    "operating_threshold": BUSINESS_OPERATING_THRESHOLD,
+    "operating_threshold_strategy": "business_balanced_recall_precision",
+    "default_threshold": 0.5,
+    "max_f1_threshold": round(best_f1_threshold, 6),
+    "high_recall_threshold": round(high_recall_threshold, 6),
+    "high_recall_target": HIGH_RECALL_TARGET,
+    "note": (
+        "Use 0.40 as the AR operating threshold: it keeps recall near 70% "
+        "while reducing queue volume versus the max-F1 threshold."
+    ),
+}
+with open(THRESHOLD_CONFIG_PATH, "w") as f:
+    json.dump(threshold_config, f, indent=2)
+print(f"Saved threshold config: {THRESHOLD_CONFIG_PATH}")
 
 print_section("STEP 08 COMPLETE")
 print(f"""

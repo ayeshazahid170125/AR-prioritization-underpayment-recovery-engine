@@ -140,6 +140,7 @@ DERIVED_LEAKAGE_COLS = [
 # "Gap" in the name.
 INDIRECT_LEAKAGE_RISK_COLS = [
     "Avg_Mdcr_Alowd_Amt", "Avg_Mdcr_Alowd_Amt_log",
+    "Avg_Mdcr_Pymt_Amt",
     "Expected_Payment_NonFacility_Avg", "Expected_Payment_Facility_Avg",
     "Expected_Payment_Used",
 ]
@@ -165,6 +166,11 @@ The model will be trained ONLY on: procedure_category, payer_type_proxy,
 provider type/state, Tot_Srvcs/Tot_Benes (and their logs), Avg_Sbmtd_Chrg,
 services_per_beneficiary, Place_Of_Srvc, and entity type -- none of which
 were used to construct high_recovery_priority.
+
+Avg_Mdcr_Pymt_Amt is also excluded even though the target uses allowed
+amount, not payment amount. In Medicare FFS, payment amount is a near-linear
+proxy for allowed amount after coinsurance/deductible effects, so retaining
+it would let tree models reconstruct much of the answer key indirectly.
 """)
 
 

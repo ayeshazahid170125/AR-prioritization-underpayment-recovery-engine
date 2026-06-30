@@ -48,6 +48,7 @@ MODEL_DIR = BASE_DIR / "model_outputs"
 BEST_MODEL_PATH = MODEL_DIR / "best_collection_model.pkl"
 SCALER_PATH = MODEL_DIR / "feature_scaler.pkl"
 FEATURE_COLS_PATH = MODEL_DIR / "model_feature_columns.json"
+THRESHOLD_CONFIG_PATH = MODEL_DIR / "decision_threshold_config.json"
 
 OUTPUT_DIR = BASE_DIR / "ar_priority_outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -95,6 +96,23 @@ CONFIDENCE_RULES = [
     },
 ]
 
+SURGICAL_PROVIDER_REVIEW_TYPES = {
+    "Optometry",
+    "Ophthalmology",
+    "Podiatry",
+    "Orthopedic Surgery",
+    "General Surgery",
+    "Plastic and Reconstructive Surgery",
+}
+
+
+def is_surgical_hcpcs(code):
+    """Return True for CPT surgical range 10000-69999."""
+    code = str(code)
+    if not code.isdigit():
+        return False
+    return 10000 <= int(code) <= 69999
+
 
 def print_section(title):
     print("\n" + "=" * 80)
@@ -107,7 +125,47 @@ def print_section(title):
 # ============================================================
 print_section("LOAD modeling_dataset.csv -- FILTER TO UNDERPAID ROWS")
 
-df = pd.read_csv(INPUT_PATH, low_memory=False)
+model = None
+scaler = None
+feature_cols = None
+model_name = "rule_based_fallback"
+operating_threshold = 0.5
+
+try:
+    if BEST_MODEL_PATH.exists() and FEATURE_COLS_PATH.exists():
+        model = joblib.load(BEST_MODEL_PATH)
+        with open(FEATURE_COLS_PATH) as f:
+            feature_cols = json.load(f)
+        if THRESHOLD_CONFIG_PATH.exists():
+            with open(THRESHOLD_CONFIG_PATH) as f:
+                threshold_config = json.load(f)
+            operating_threshold = float(threshold_config.get("operating_threshold", 0.5))
+        if SCALER_PATH.exists():
+            scaler = joblib.load(SCALER_PATH)
+        model_name = type(model).__name__
+    else:
+        print("Step 08 model artifacts not found -- using rule-based confidence fallback only.")
+except Exception as e:
+    print(f"Could not load Step 08 model ({e}) -- using rule-based confidence fallback only.")
+    model = None
+    feature_cols = None
+
+available_cols = set(pd.read_csv(INPUT_PATH, nrows=0).columns)
+categorical_cols = ["procedure_category", "payer_type_proxy", "Place_Of_Srvc"]
+base_cols = [
+    "Rndrng_NPI", "Rndrng_Prvdr_Type", "Rndrng_Prvdr_State_Abrvtn",
+    "HCPCS_Cd", "Place_Of_Srvc", "Tot_Srvcs", "Avg_Mdcr_Alowd_Amt",
+    "Expected_Payment_Used", "Payment_Gap", "Payment_Gap_Pct",
+    "Total_Dollar_Gap", "Is_Underpaid",
+]
+feature_source_cols = []
+if feature_cols is not None:
+    feature_source_cols = [c for c in feature_cols if c in available_cols]
+usecols = sorted(set(
+    [c for c in base_cols + categorical_cols + feature_source_cols if c in available_cols]
+))
+
+df = pd.read_csv(INPUT_PATH, usecols=usecols, low_memory=True)
 print(f"Loaded: {df.shape[0]:,} rows x {df.shape[1]} columns")
 
 queue_df = df[df["Is_Underpaid"]].copy()
@@ -123,31 +181,55 @@ queue_df["estimated_recovery"] = queue_df["Total_Dollar_Gap"].abs().round(2)
 
 
 # ============================================================
-# TRY TO LOAD STEP 08'S TRAINED MODEL FOR REAL PROBABILITIES
+# DATA LIMITATION FLAG -- MODIFIER / SURGICAL ADJUSTMENT BLIND SPOT
 # ============================================================
-print_section("ATTEMPTING TO LOAD STEP 08 COLLECTION MODEL")
+print_section("FLAGGING POSSIBLE MODIFIER / SURGICAL ADJUSTMENT ARTIFACTS")
+print("""
+The public CMS PUF does not expose claim-line modifiers. Large apparent
+underpayments on surgical HCPCS codes can reflect correct modifier-driven
+pricing, including global surgical co-management (54/55/56), bilateral
+adjustments, assistant-surgeon reductions, or MPPR. These rows are kept in
+the audit queue, but flagged so client-facing recovery totals can be shown
+both gross and excluding rows that require modifier review.
+""")
 
-model = None
-scaler = None
-feature_cols = None
-model_name = "rule_based_fallback"
+queue_df["is_surgical_hcpcs"] = queue_df["HCPCS_Cd"].apply(is_surgical_hcpcs)
+queue_df["requires_modifier_review"] = (
+    queue_df["is_surgical_hcpcs"]
+    & (queue_df["Payment_Gap_Pct"] <= -70)
+    & (
+        queue_df["Rndrng_Prvdr_Type"].isin(SURGICAL_PROVIDER_REVIEW_TYPES)
+        | queue_df["HCPCS_Cd"].astype(str).eq("66984")
+    )
+)
+queue_df["modifier_review_reason"] = np.where(
+    queue_df["requires_modifier_review"],
+    "Severe surgical-code gap; PUF lacks modifiers 54/55/56, bilateral, assistant-surgeon, and MPPR detail.",
+    "",
+)
 
-try:
-    if BEST_MODEL_PATH.exists() and FEATURE_COLS_PATH.exists():
-        model = joblib.load(BEST_MODEL_PATH)
-        with open(FEATURE_COLS_PATH) as f:
-            feature_cols = json.load(f)
-        if SCALER_PATH.exists():
-            scaler = joblib.load(SCALER_PATH)
-        model_name = type(model).__name__
-        print(f"Loaded Step 08 model: {model_name}")
-        print(f"Expected feature columns: {len(feature_cols)}")
-    else:
-        print("Step 08 model artifacts not found -- using rule-based confidence fallback only.")
-        print(f"  Looked for: {BEST_MODEL_PATH}")
-except Exception as e:
-    print(f"Could not load Step 08 model ({e}) -- using rule-based confidence fallback only.")
-    model = None
+flagged_modifier_rows = int(queue_df["requires_modifier_review"].sum())
+flagged_modifier_recovery = round(
+    queue_df.loc[queue_df["requires_modifier_review"], "estimated_recovery"].sum(), 2
+)
+client_ready_recovery = round(
+    queue_df.loc[~queue_df["requires_modifier_review"], "estimated_recovery"].sum(), 2
+)
+print(f"Rows requiring modifier/surgical review: {flagged_modifier_rows:,}")
+print(f"Gross recovery in flagged rows: ${flagged_modifier_recovery:,.2f}")
+print(f"Recovery excluding flagged rows: ${client_ready_recovery:,.2f}")
+
+
+# ============================================================
+# REPORT STEP 08 MODEL STATUS
+# ============================================================
+print_section("STEP 08 COLLECTION MODEL STATUS")
+if model is not None and feature_cols is not None:
+    print(f"Loaded Step 08 model: {model_name}")
+    print(f"Expected feature columns: {len(feature_cols)}")
+    print(f"Operating decision threshold: {operating_threshold:.4f}")
+else:
+    print("Using rule-based confidence fallback only.")
 
 
 # ============================================================
@@ -178,28 +260,29 @@ queue_df["collection_probability"] = np.nan
 if model is not None and feature_cols is not None:
     print_section("SCORING QUEUE ROWS WITH STEP 08 MODEL")
     try:
-        categorical_cols = ["procedure_category", "payer_type_proxy", "Place_Of_Srvc"]
-        numeric_source_cols = [
-            c for c in df.select_dtypes(include=[np.number]).columns
-            if c in feature_cols or any(c == fc for fc in feature_cols)
-        ]
         # Rebuild the same one-hot feature frame Step 08 trained on, then
         # reindex to the exact saved feature_cols so column order/presence
         # always matches what the model expects (missing dummy columns ->
         # 0, extra columns dropped).
-        encode_source = queue_df[
+        probabilities = np.empty(len(queue_df), dtype=np.float32)
+        score_cols = (
             [c for c in categorical_cols if c in queue_df.columns]
-            + [c for c in df.select_dtypes(include=[np.number]).columns if c in queue_df.columns]
-        ].copy()
-        encoded = pd.get_dummies(
-            encode_source,
-            columns=[c for c in categorical_cols if c in encode_source.columns],
-            drop_first=True,
+            + [c for c in feature_cols if c in queue_df.columns]
         )
-        encoded = encoded.reindex(columns=feature_cols, fill_value=0).fillna(0)
-
-        X_queue = scaler.transform(encoded) if scaler is not None else encoded.values
-        probabilities = model.predict_proba(X_queue)[:, 1]
+        chunk_size = 500_000
+        for start in range(0, len(queue_df), chunk_size):
+            end = min(start + chunk_size, len(queue_df))
+            encode_source = queue_df.iloc[start:end][score_cols].copy()
+            encoded = pd.get_dummies(
+                encode_source,
+                columns=[c for c in categorical_cols if c in encode_source.columns],
+                drop_first=True,
+            )
+            encoded = encoded.reindex(columns=feature_cols, fill_value=0).fillna(0)
+            encoded = encoded.astype(np.float32)
+            X_queue = scaler.transform(encoded) if scaler is not None else encoded
+            probabilities[start:end] = model.predict_proba(X_queue)[:, 1].astype(np.float32)
+            print(f"  scored rows {start + 1:,}-{end:,}")
         queue_df["collection_probability"] = probabilities
         print(f"Scored {len(queue_df):,} rows. "
               f"Probability range: [{probabilities.min():.4f}, {probabilities.max():.4f}]")
@@ -211,9 +294,15 @@ queue_df["collection_model_name"] = model_name
 queue_df["confidence_score"] = queue_df["collection_probability"].fillna(
     queue_df["rule_confidence_score"]
 )
+queue_df["model_operating_threshold"] = operating_threshold
+queue_df["predicted_high_priority"] = queue_df["collection_probability"].ge(
+    operating_threshold
+).fillna(False)
 model_scored_rows = int(queue_df["collection_probability"].notna().sum())
 print(f"\nRows scored by trained model : {model_scored_rows:,}")
 print(f"Rows on rule-based fallback   : {len(queue_df) - model_scored_rows:,}")
+if model_scored_rows > 0:
+    print(f"Rows above operating threshold: {int(queue_df['predicted_high_priority'].sum()):,}")
 
 
 # ============================================================
@@ -263,10 +352,12 @@ print_section("SAVING AR PRIORITY QUEUE")
 
 output_cols = [
     "rank", "Rndrng_NPI", "Rndrng_Prvdr_Type", "Rndrng_Prvdr_State_Abrvtn",
-    "HCPCS_Cd", "Place_Of_Srvc", "Tot_Srvcs",
+    "HCPCS_Cd", "Place_Of_Srvc", "payer_type_proxy", "Tot_Srvcs",
     "Avg_Mdcr_Alowd_Amt", "Expected_Payment_Used",
     "Payment_Gap", "Payment_Gap_Pct", "estimated_recovery",
+    "is_surgical_hcpcs", "requires_modifier_review", "modifier_review_reason",
     "rule_confidence_score", "collection_probability", "collection_model_name",
+    "model_operating_threshold", "predicted_high_priority",
     "confidence_score", "priority_score", "priority_tier", "recommended_action",
 ]
 output_cols = [c for c in output_cols if c in queue_df.columns]
@@ -287,7 +378,12 @@ summary = pd.DataFrame([
     {"metric": "model_used", "value": model_name},
     {"metric": "model_scored_rows", "value": model_scored_rows},
     {"metric": "rule_fallback_rows", "value": len(queue_df) - model_scored_rows},
+    {"metric": "model_operating_threshold", "value": operating_threshold},
+    {"metric": "predicted_high_priority_rows", "value": int(queue_df["predicted_high_priority"].sum())},
     {"metric": "total_estimated_recovery", "value": round(queue_df["estimated_recovery"].sum(), 2)},
+    {"metric": "modifier_review_rows", "value": flagged_modifier_rows},
+    {"metric": "modifier_review_estimated_recovery", "value": flagged_modifier_recovery},
+    {"metric": "estimated_recovery_excluding_modifier_review", "value": client_ready_recovery},
     {"metric": "total_priority_score", "value": round(queue_df["priority_score"].sum(), 2)},
     {"metric": "critical_tier_rows", "value": int((queue_df["priority_tier"] == "Critical").sum())},
     {"metric": "high_tier_rows", "value": int((queue_df["priority_tier"] == "High").sum())},

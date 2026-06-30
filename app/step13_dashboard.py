@@ -235,6 +235,10 @@ html, body {
     font-family: 'Inter', sans-serif;
     color: var(--text-primary);
 }
+::selection {
+    background: rgba(37, 99, 235, 0.18);
+    color: var(--text-primary);
+}
 h1, h2, h3, h4, h5, h6 {
     font-family: 'Plus Jakarta Sans', sans-serif !important;
 }
@@ -571,6 +575,26 @@ div[data-testid="stFormSubmitButton"] > button:hover {
     opacity: 0.75 !important;
 }
 label[data-testid="stWidgetLabel"] p { color: var(--text-secondary) !important; font-weight: 600 !important; font-size: 13px !important; }
+[data-testid="stRadio"] label,
+[data-testid="stRadio"] label p,
+[data-testid="stRadio"] label span,
+[data-testid="stRadio"] div[role="radiogroup"] label,
+[data-testid="stRadio"] div[role="radiogroup"] label p,
+[data-testid="stRadio"] div[role="radiogroup"] label span {
+    color: var(--text-primary) !important;
+    opacity: 1 !important;
+}
+[data-testid="stRadio"] [data-baseweb="radio"] {
+    color: var(--text-primary) !important;
+}
+[data-testid="stRadio"] [role="radio"] {
+    border-color: var(--input-border) !important;
+    background-color: var(--bg-input) !important;
+}
+[data-testid="stRadio"] [role="radio"][aria-checked="true"] {
+    border-color: var(--accent) !important;
+    background-color: var(--accent) !important;
+}
 [data-testid="stCheckbox"] label {
     align-items: center !important;
 }
@@ -712,8 +736,20 @@ def gauge_theme():
 
 def chart_theme():
     if st.session_state.get("theme", "light") == "light":
-        return {"font_color": "#475569", "grid_color": "rgba(15,23,42,0.07)", "bar_color": "#2563EB"}
-    return {"font_color": "#94A3B8", "grid_color": "rgba(255,255,255,0.07)", "bar_color": "#3B82F6"}
+        return {
+            "font_color": "#334155",
+            "axis_color": "#475569",
+            "title_color": "#1E293B",
+            "grid_color": "rgba(15,23,42,0.12)",
+            "bar_color": "#2563EB",
+        }
+    return {
+        "font_color": "#CBD5E1",
+        "axis_color": "#CBD5E1",
+        "title_color": "#F8FAFC",
+        "grid_color": "rgba(255,255,255,0.12)",
+        "bar_color": "#3B82F6",
+    }
 
 
 def horizontal_bar(df, x_col, y_col, title, color=None):
@@ -724,14 +760,80 @@ def horizontal_bar(df, x_col, y_col, title, color=None):
         marker_color=color or ct["bar_color"],
     ))
     fig.update_layout(
-        title=dict(text=title, font=dict(size=13, color=ct["font_color"], family="Plus Jakarta Sans, sans-serif")),
+        title=dict(text=title, font=dict(size=13, color=ct["title_color"], family="Plus Jakarta Sans, sans-serif")),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color=ct["font_color"], family="Inter, sans-serif", size=11),
-        xaxis=dict(gridcolor=ct["grid_color"], zerolinecolor=ct["grid_color"]),
+        xaxis=dict(
+            gridcolor=ct["grid_color"],
+            zerolinecolor=ct["grid_color"],
+            linecolor=ct["grid_color"],
+            tickfont=dict(color=ct["axis_color"], size=11),
+            title_font=dict(color=ct["axis_color"]),
+        ),
+        yaxis=dict(
+            tickfont=dict(color=ct["axis_color"], size=11),
+            title_font=dict(color=ct["axis_color"]),
+        ),
         margin=dict(t=40, b=10, l=10, r=10),
         height=max(280, 28 * len(df)),
     )
     return fig
+
+
+def dataframe_theme():
+    if st.session_state.get("theme", "light") == "light":
+        return {
+            "header_bg": "#E2E8F0",
+            "cell_bg": "#FFFFFF",
+            "cell_alt_bg": "#F8FAFC",
+            "text": "#0F172A",
+            "muted": "#334155",
+            "border": "#CBD5E1",
+        }
+    return {
+        "header_bg": "#1A1D25",
+        "cell_bg": "#0B0F16",
+        "cell_alt_bg": "#0F141D",
+        "text": "#F8FAFC",
+        "muted": "#CBD5E1",
+        "border": "#2A2F3A",
+    }
+
+
+def styled_dataframe(df):
+    dt = dataframe_theme()
+    return (
+        df.style
+        .set_properties(**{
+            "background-color": dt["cell_bg"],
+            "color": dt["text"],
+            "border-color": dt["border"],
+        })
+        .set_table_styles([
+            {
+                "selector": "thead th",
+                "props": [
+                    ("background-color", dt["header_bg"]),
+                    ("color", dt["muted"]),
+                    ("border-color", dt["border"]),
+                    ("font-weight", "700"),
+                ],
+            },
+            {
+                "selector": "tbody tr:nth-child(even) td",
+                "props": [
+                    ("background-color", dt["cell_alt_bg"]),
+                    ("color", dt["text"]),
+                ],
+            },
+            {
+                "selector": "tbody td",
+                "props": [
+                    ("border-color", dt["border"]),
+                ],
+            },
+        ])
+    )
 
 
 def kpi_row(items):
@@ -820,10 +922,10 @@ def render_ar_queue_tab():
         return
 
     df = queue_df.copy()
-    st.caption(
-        "Showing the Step 11 **Top 500** highest-value underpaid claims "
+    _queue_caption_legacy = (
+        "Showing the **Top 500** highest-value underpaid claim groups. "
         "(the full queue can be millions of rows — see `ar_priority_outputs/ar_priority_queue.csv` "
-        "for every row). Filters and totals below apply only to this top-500 sample."
+        ""
     )
 
     st.markdown('<div class="form-section" style="margin-top:0;">Filters</div>', unsafe_allow_html=True)
@@ -905,9 +1007,14 @@ def render_ar_queue_tab():
     }
 
     st.markdown('<div class="card-title" style="margin-top:24px;">AR Priority Queue</div>', unsafe_allow_html=True)
+    display_df = filtered[display_cols].rename(columns=rename_map)
     st.dataframe(
-        filtered[display_cols].rename(columns=rename_map),
+        styled_dataframe(display_df),
         use_container_width=True, height=420, hide_index=True,
+    )
+    st.caption(
+        "Showing the **Top 500** highest-value underpaid claim groups. "
+        "Filters and totals below apply to this top-priority review sample."
     )
 
     if len(filtered) and "estimated_recovery" in filtered:
@@ -919,9 +1026,13 @@ def render_ar_queue_tab():
             use_container_width=True,
         )
 
-    st.markdown(
+    _queue_disclaimer_legacy = (
         "<div class='disclaimer-bar'>Source: Step 11 <code>top_underpayments.csv</code>. "
         "CMS Medicare PUF 2023 &middot; Portfolio demo — not real recoverable amounts.</div>",
+    )
+    st.markdown(
+        "<div class='disclaimer-bar'>CMS Medicare PUF 2023 &middot; Portfolio demo. "
+        "Estimated recovery amounts are prioritization signals, not confirmed recoverable dollars.</div>",
         unsafe_allow_html=True,
     )
 

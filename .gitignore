@@ -8,6 +8,7 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 env/
 
@@ -29,6 +30,10 @@ data/
 model_outputs/
 *.pkl
 *.joblib
+
+# Frontend dependencies/build output
+node_modules/
+dist/
 
 # Keep curated docs/reports tracked
 !reports/

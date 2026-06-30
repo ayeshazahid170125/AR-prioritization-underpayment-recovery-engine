@@ -19,7 +19,8 @@ $steps = @(
     "src\step08_collection_model.py",
     "src\step09_ar_priority_queue.py",
     "src\step10_isolation_forest_anomalies.py",
-    "src\step11_underpayment_report.py"
+    "src\step11_underpayment_report.py",
+    "src\step14_regression_validation.py"
 )
 
 foreach ($step in $steps) {

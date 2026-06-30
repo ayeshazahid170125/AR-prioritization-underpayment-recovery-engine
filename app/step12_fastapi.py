@@ -17,7 +17,7 @@ import json
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -34,6 +34,7 @@ BEST_MODEL_PATH  = MODEL_DIR / "best_collection_model.pkl"
 SCALER_PATH      = MODEL_DIR / "feature_scaler.pkl"
 FEATURE_COLS_PATH= MODEL_DIR / "model_feature_columns.json"
 FINAL_REPORT_PATH= MODEL_DIR / "final_model_evaluation_report.json"
+THRESHOLD_CONFIG_PATH = MODEL_DIR / "decision_threshold_config.json"
 
 # ============================================================
 # LOAD MODEL ARTIFACTS AT STARTUP
@@ -44,7 +45,8 @@ try:
     model = joblib.load(BEST_MODEL_PATH)
     print(f"Model loaded: {type(model).__name__}")
 except Exception as e:
-    raise RuntimeError(f"Cannot load model: {e}")
+    model = None
+    print(f"Model unavailable: {e}")
 
 try:
     scaler = joblib.load(SCALER_PATH)
@@ -58,13 +60,37 @@ try:
         FEATURE_COLS = json.load(f)
     print(f"Feature columns loaded: {len(FEATURE_COLS)} features")
 except Exception as e:
-    raise RuntimeError(f"Cannot load feature columns: {e}")
+    FEATURE_COLS = []
+    print(f"Feature columns unavailable: {e}")
 
 try:
     with open(FINAL_REPORT_PATH) as f:
         MODEL_REPORT = json.load(f)
 except Exception:
     MODEL_REPORT = {}
+
+try:
+    with open(THRESHOLD_CONFIG_PATH) as f:
+        THRESHOLD_CONFIG = json.load(f)
+except Exception:
+    THRESHOLD_CONFIG = {}
+
+OPERATING_THRESHOLD = float(
+    THRESHOLD_CONFIG.get("operating_threshold", MODEL_REPORT.get("optimized_threshold", 0.5))
+)
+
+# ============================================================
+# DASHBOARD DATA SOURCES
+# ============================================================
+REPORT_DIR = BASE_DIR / "report_outputs"
+QUEUE_PATH = REPORT_DIR / "top_underpayments.csv"
+SUMMARY_PATHS = {
+    "hcpcs": REPORT_DIR / "underpayment_summary_by_hcpcs.csv",
+    "state": REPORT_DIR / "underpayment_summary_by_state.csv",
+    "provider": REPORT_DIR / "underpayment_summary_by_provider_type.csv",
+    "payer": REPORT_DIR / "underpayment_summary_by_payer_type.csv",
+}
+EXEC_SUMMARY_PATH = REPORT_DIR / "underpayment_report_summary.csv"
 
 # ============================================================
 # FASTAPI APP
@@ -113,10 +139,22 @@ class ClaimInput(BaseModel):
     zero_expected_reason_flag: Optional[int] = Field(default=0)
     locality_count: Optional[float] = Field(default=1.0)
     ruca_unknown_flag: Optional[int] = Field(default=0)
+    provider_row_count: Optional[float] = Field(default=0.0, ge=0)
+    provider_total_services: Optional[float] = Field(default=0.0, ge=0)
+    hcpcs_row_count: Optional[float] = Field(default=0.0, ge=0)
+    hcpcs_total_services: Optional[float] = Field(default=0.0, ge=0)
+    state_row_count: Optional[float] = Field(default=0.0, ge=0)
+    state_total_services: Optional[float] = Field(default=0.0, ge=0)
+    hcpcs_state_row_share: Optional[float] = Field(default=0.0, ge=0)
+    avg_charge_per_beneficiary: Optional[float] = Field(default=None, ge=0)
+    provider_service_share: Optional[float] = Field(default=0.0, ge=0)
+    hcpcs_service_share_in_state: Optional[float] = Field(default=0.0, ge=0)
 
 
 class PredictionResponse(BaseModel):
     recovery_probability: float
+    operating_threshold: float
+    predicted_high_priority: bool
     priority_tier: str
     recommended_action: str
     estimated_recovery_signal: str
@@ -164,7 +202,28 @@ def build_feature_row(claim: ClaimInput) -> pd.DataFrame:
         "duplicate_key_flag":      claim.duplicate_key_flag or 0,
         "Locality_Count":          claim.locality_count or 1.0,
         "RUCA_Unknown_Flag":       claim.ruca_unknown_flag or 0,
+        "provider_row_count":      claim.provider_row_count or 0.0,
+        "provider_total_services": claim.provider_total_services or 0.0,
+        "hcpcs_row_count":         claim.hcpcs_row_count or 0.0,
+        "hcpcs_total_services":    claim.hcpcs_total_services or 0.0,
+        "state_row_count":         claim.state_row_count or 0.0,
+        "state_total_services":    claim.state_total_services or 0.0,
+        "hcpcs_state_row_share":   claim.hcpcs_state_row_share or 0.0,
+        "avg_charge_per_beneficiary": (
+            claim.avg_charge_per_beneficiary
+            if claim.avg_charge_per_beneficiary is not None
+            else claim.avg_sbmtd_chrg * claim.tot_srvcs / max(claim.tot_benes, 1)
+        ),
+        "provider_service_share": claim.provider_service_share or 0.0,
+        "hcpcs_service_share_in_state": claim.hcpcs_service_share_in_state or 0.0,
     }
+
+    for col in [
+        "provider_row_count", "provider_total_services", "hcpcs_row_count",
+        "hcpcs_total_services", "state_row_count", "state_total_services",
+        "avg_charge_per_beneficiary",
+    ]:
+        raw[f"{col}_log"] = float(np.log1p(max(raw[col], 0)))
 
     df = pd.DataFrame([raw])
 
@@ -179,8 +238,8 @@ def build_feature_row(claim: ClaimInput) -> pd.DataFrame:
 
 def get_priority_tier(prob: float) -> str:
     if prob >= 0.80:   return "Critical"
-    if prob >= 0.60:   return "High"
-    if prob >= 0.40:   return "Medium"
+    if prob >= max(0.60, OPERATING_THRESHOLD): return "High"
+    if prob >= min(0.40, OPERATING_THRESHOLD): return "Medium"
     return "Low"
 
 
@@ -222,13 +281,21 @@ def get_top_risk_factors(df_row: pd.DataFrame, n: int = 3) -> List[str]:
 
 
 def predict_single(claim: ClaimInput) -> PredictionResponse:
+    if model is None or not FEATURE_COLS:
+        raise HTTPException(
+            status_code=503,
+            detail="Model artifacts are missing. Rebuild or restore model_outputs/*.pkl before prediction.",
+        )
     df_row = build_feature_row(claim)
     X = scaler.transform(df_row) if scaler else df_row.values
     prob = float(model.predict_proba(X)[0][1])
+    predicted_high_priority = prob >= OPERATING_THRESHOLD
     tier = get_priority_tier(prob)
 
     return PredictionResponse(
         recovery_probability=round(prob, 4),
+        operating_threshold=round(OPERATING_THRESHOLD, 4),
+        predicted_high_priority=predicted_high_priority,
         priority_tier=tier,
         recommended_action=get_recommended_action(tier),
         estimated_recovery_signal=get_recovery_signal(prob),
@@ -244,8 +311,10 @@ def predict_single(claim: ClaimInput) -> PredictionResponse:
 def health():
     return {
         "status": "ok",
-        "model": type(model).__name__,
+        "model": type(model).__name__ if model is not None else None,
+        "model_available": model is not None and bool(FEATURE_COLS),
         "features": len(FEATURE_COLS),
+        "operating_threshold": OPERATING_THRESHOLD,
         "project": "Project 2 - AR Underpayment Recovery Engine",
     }
 
@@ -253,10 +322,12 @@ def health():
 @app.get("/model/info")
 def model_info():
     return {
-        "model_name": type(model).__name__,
+        "model_name": type(model).__name__ if model is not None else None,
+        "model_available": model is not None and bool(FEATURE_COLS),
         "n_features": len(FEATURE_COLS),
         "feature_columns": FEATURE_COLS,
         "evaluation": MODEL_REPORT,
+        "threshold_config": THRESHOLD_CONFIG or {"operating_threshold": OPERATING_THRESHOLD},
         "target": "high_recovery_priority",
         "target_definition": "Claims where Total_Dollar_Gap < -$50 AND Payment_Gap_Pct < -10%",
         "disclaimer": (
@@ -266,10 +337,91 @@ def model_info():
     }
 
 
+def read_csv_records(path: Path) -> list[dict]:
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Missing data file: {path.name}")
+    return pd.read_csv(path).replace({np.nan: None}).to_dict(orient="records")
+
+
+@app.get("/dashboard/summary")
+def dashboard_summary():
+    rows = read_csv_records(EXEC_SUMMARY_PATH)
+    return {str(row["metric"]): row["value"] for row in rows if "metric" in row and "value" in row}
+
+
+@app.get("/dashboard/queue")
+def dashboard_queue(
+    limit: int = Query(default=500, ge=1, le=500),
+    provider_type: Optional[str] = None,
+    state: Optional[str] = None,
+    tier: Optional[str] = None,
+    payer_type: Optional[str] = None,
+    hcpcs: Optional[str] = None,
+    min_recovery: float = Query(default=0.0, ge=0),
+):
+    if not QUEUE_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"Missing data file: {QUEUE_PATH.name}")
+
+    df = pd.read_csv(QUEUE_PATH)
+    filters = {
+        "Rndrng_Prvdr_Type": provider_type,
+        "Rndrng_Prvdr_State_Abrvtn": state,
+        "priority_tier": tier,
+        "payer_type_proxy": payer_type,
+    }
+    for column, value in filters.items():
+        if value and column in df.columns:
+            df = df[df[column].astype(str) == value]
+    if hcpcs and "HCPCS_Cd" in df.columns:
+        df = df[df["HCPCS_Cd"].astype(str).str.contains(hcpcs, case=False, na=False)]
+    if "estimated_recovery" in df.columns:
+        df = df[df["estimated_recovery"] >= min_recovery]
+
+    records = df.head(limit).replace({np.nan: None}).to_dict(orient="records")
+    return {
+        "rows": records,
+        "total_rows": int(len(df)),
+        "total_estimated_recovery": float(df["estimated_recovery"].sum()) if "estimated_recovery" in df.columns else 0.0,
+        "critical_high_count": int(df["priority_tier"].isin(["Critical", "High"]).sum()) if "priority_tier" in df.columns else 0,
+        "avg_confidence": float(df["confidence_score"].mean()) if "confidence_score" in df.columns and len(df) else None,
+    }
+
+
+@app.get("/dashboard/report/{report_name}")
+def dashboard_report(report_name: str, limit: int = Query(default=25, ge=1, le=200)):
+    path = SUMMARY_PATHS.get(report_name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Unknown report. Use hcpcs, state, provider, or payer.")
+    rows = read_csv_records(path)
+    return {"rows": rows[:limit], "total_rows": len(rows)}
+
+
+@app.get("/dashboard/filter-options")
+def dashboard_filter_options():
+    if not QUEUE_PATH.exists():
+        raise HTTPException(status_code=404, detail=f"Missing data file: {QUEUE_PATH.name}")
+    df = pd.read_csv(QUEUE_PATH)
+
+    def options(column: str) -> list[str]:
+        if column not in df.columns:
+            return []
+        return sorted(str(value) for value in df[column].dropna().unique().tolist())
+
+    return {
+        "provider_types": options("Rndrng_Prvdr_Type"),
+        "states": options("Rndrng_Prvdr_State_Abrvtn"),
+        "tiers": [tier for tier in ["Critical", "High", "Medium", "Low"] if tier in options("priority_tier")],
+        "payer_types": options("payer_type_proxy"),
+        "max_recovery": float(df["estimated_recovery"].max()) if "estimated_recovery" in df.columns and len(df) else 0.0,
+    }
+
+
 @app.post("/predict/recovery", response_model=PredictionResponse)
 def predict_recovery(claim: ClaimInput):
     try:
         return predict_single(claim)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -288,6 +440,8 @@ def predict_batch(batch: BatchInput):
             high_priority_count=high_priority,
             critical_count=critical,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

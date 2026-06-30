@@ -51,18 +51,20 @@ print_section("LOAD AR PRIORITY QUEUE (STEP 09 OUTPUT)")
 if not QUEUE_PATH.exists():
     raise FileNotFoundError(f"File not found: {QUEUE_PATH}\nRun step09_ar_priority_queue.py first.")
 
-queue_df = pd.read_csv(QUEUE_PATH, low_memory=False)
+queue_df = pd.read_csv(QUEUE_PATH, low_memory=True)
 print(f"Loaded: {queue_df.shape[0]:,} rows x {queue_df.shape[1]} columns")
 
 # Bring in payer_type_proxy from the feature-engineered file (Step 09's
 # output doesn't carry it, but we need it for the "by payer" requirement).
 print_section("JOINING payer_type_proxy FOR 'BY PAYER' REPORTING")
 
-if FEATURE_PATH.exists():
+if "payer_type_proxy" in queue_df.columns:
+    print("payer_type_proxy already present in Step 09 output -- no join needed.")
+elif FEATURE_PATH.exists():
     payer_lookup = pd.read_csv(
         FEATURE_PATH,
         usecols=["Rndrng_NPI", "HCPCS_Cd", "Place_Of_Srvc", "payer_type_proxy"],
-        low_memory=False,
+        low_memory=True,
     ).drop_duplicates(subset=["Rndrng_NPI", "HCPCS_Cd", "Place_Of_Srvc"])
 
     queue_df = queue_df.merge(
@@ -215,6 +217,19 @@ print_section("EXECUTIVE SUMMARY")
 
 total_underpaid_rows = len(queue_df)
 total_recovery = queue_df["estimated_recovery"].sum()
+if "requires_modifier_review" in queue_df.columns:
+    modifier_review_mask = (
+        queue_df["requires_modifier_review"]
+        .fillna(False)
+        .astype(str)
+        .str.lower()
+        .isin(["true", "1", "yes"])
+    )
+else:
+    modifier_review_mask = pd.Series(False, index=queue_df.index)
+modifier_review_rows = int(modifier_review_mask.sum())
+modifier_review_recovery = queue_df.loc[modifier_review_mask, "estimated_recovery"].sum()
+client_ready_recovery = queue_df.loc[~modifier_review_mask, "estimated_recovery"].sum()
 critical_rows = (queue_df["priority_tier"] == "Critical").sum()
 high_rows = (queue_df["priority_tier"] == "High").sum()
 top_state = state_summary.iloc[0]["provider_state"]
@@ -226,6 +241,9 @@ top_provider_type = provider_type_summary.iloc[0]["provider_type"]
 summary = pd.DataFrame([
     {"metric": "total_underpaid_rows", "value": total_underpaid_rows},
     {"metric": "total_estimated_recovery", "value": round(total_recovery, 2)},
+    {"metric": "modifier_review_rows", "value": modifier_review_rows},
+    {"metric": "modifier_review_estimated_recovery", "value": round(modifier_review_recovery, 2)},
+    {"metric": "estimated_recovery_excluding_modifier_review", "value": round(client_ready_recovery, 2)},
     {"metric": "critical_tier_rows", "value": int(critical_rows)},
     {"metric": "high_tier_rows", "value": int(high_rows)},
     {"metric": "top_state_by_recovery", "value": top_state},
@@ -254,6 +272,6 @@ All report files saved to: {OUTPUT_DIR}
   - underpayment_report_summary.csv
 
 Next: Step 12 will build the AR workqueue dashboard using these summary
-files, so the dashboard never needs to load the full 5.7M-row queue
+files, so the dashboard never needs to load the full 6.1M-row queue
 directly.
 """)

@@ -37,33 +37,36 @@ Positive class when:
 | Metric | Value |
 |---|---:|
 | Best model | LightGBM |
-| Test PR-AUC | 0.8754 |
-| Test ROC-AUC | 0.8857 |
-| Test F1 | 0.7577 |
-| Training rows | 6,142,472 |
-| Test rows | 1,535,619 |
-| Features | 23 |
+| CV PR-AUC | 0.8785 |
+| Test PR-AUC | 0.8859 |
+| Test ROC-AUC | 0.8889 |
+| Test F1, default threshold | 0.7769 |
+| Test F1, max-F1 threshold | 0.7786 |
+| Training rows | 1,600,000 |
+| Test rows | 400,000 |
+| Features | 39 |
 
-These metrics are from the pre-remediation run. The leakage audit was
-tightened after review to exclude `Avg_Mdcr_Pymt_Amt`, a proxy for
-`Avg_Mdcr_Alowd_Amt`. Retrain Step 07 and Step 08 before treating these
-scores as current.
+These metrics are from the leakage-safe rerun. The classifier excludes
+`Avg_Mdcr_Pymt_Amt`, a proxy for `Avg_Mdcr_Alowd_Amt`, from the feature
+set.
 
 ## Operating Threshold
 
-The default probability threshold of 0.5000 gave recall of 0.5333 on the
-existing held-out split. A no-retraining threshold tuning pass found
-0.346990 as the max-F1 threshold, but the selected AR operating threshold
-is 0.40 because it keeps recall near 70% with a smaller review queue.
+The default probability threshold of 0.5000 gave recall of 0.7601 on the
+held-out split. Threshold tuning found 0.470006 as the max-F1 threshold,
+but the selected AR operating threshold is 0.40 because it prioritizes
+recall for high-value underpayment review.
 
 | Threshold | Precision | Recall | F1 |
 |---:|---:|---:|---:|
-| 0.500000 | 0.8009 | 0.5333 | 0.6402 |
-| 0.346990 | 0.6283 | 0.7765 | 0.6946 |
-| 0.400000 | 0.6764 | 0.7013 | 0.6886 |
+| 0.500000 | 0.7942 | 0.7601 | 0.7767 |
+| 0.470006 | 0.7724 | 0.7845 | 0.7784 |
+| 0.400000 | 0.7209 | 0.8359 | 0.7742 |
 
-These threshold results are still based on the existing saved model; rerun
-Step 08 after leakage-safe feature updates for final model-card metrics.
+At the 0.40 operating threshold, 3,564,981 underpaid queue rows are scored
+high priority, about 58.9% of the queue. This favors recall over precision:
+roughly 28% of reviewed high-priority rows are expected false positives
+based on held-out precision.
 
 ## Limitations
 

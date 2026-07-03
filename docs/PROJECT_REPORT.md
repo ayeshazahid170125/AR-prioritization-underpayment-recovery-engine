@@ -29,18 +29,17 @@ This target represents a material underpayment proxy that is worth AR review. It
 
 ## Model Comparison
 
-**Status note:** the results below are retained as the original pipeline
-run. After review, `Avg_Mdcr_Pymt_Amt` was added to the leakage exclusion
-list because it is a strong proxy for allowed amount. Step 07 and Step 08
-must be rerun before the model metrics are presented as current.
+Current results are from the leakage-safe rerun. `Avg_Mdcr_Pymt_Amt` is
+excluded from the classifier feature set because it is a strong proxy for
+allowed amount.
 
 | Model | Mean PR-AUC | Std PR-AUC | Mean ROC-AUC | Mean F1 |
 |---|---:|---:|---:|---:|
-| LightGBM | 0.8688 | 0.0014 | 0.8791 | 0.7479 |
-| Hist Gradient Boosting | 0.8663 | 0.0015 | 0.8771 | 0.7622 |
-| Random Forest | 0.8561 | 0.0016 | 0.8653 | 0.7449 |
-| Gradient Boosting | 0.8546 | 0.0014 | 0.8639 | 0.7284 |
-| Logistic Regression | 0.6921 | 0.0040 | 0.7078 | 0.6060 |
+| LightGBM | 0.8785 | 0.0009 | 0.8819 | 0.7690 |
+| Hist Gradient Boosting | 0.8763 | 0.0010 | 0.8795 | 0.7658 |
+| Random Forest | 0.8712 | 0.0017 | 0.8750 | 0.7601 |
+| Gradient Boosting | 0.8617 | 0.0017 | 0.8659 | 0.7315 |
+| Logistic Regression | 0.7063 | 0.0031 | 0.7326 | 0.6312 |
 
 ## Selected Model
 
@@ -58,26 +57,31 @@ Final test metrics:
 
 | Metric | Value |
 |---|---:|
-| Test PR-AUC | 0.8754 |
-| Test ROC-AUC | 0.8857 |
-| Test F1 | 0.7577 |
-| Training rows | 6,142,472 |
-| Test rows | 1,535,619 |
-| Features | 23 |
+| Test PR-AUC | 0.8859 |
+| Test ROC-AUC | 0.8889 |
+| Test F1, default threshold | 0.7769 |
+| Test F1, max-F1 threshold | 0.7786 |
+| Training rows | 1,600,000 |
+| Test rows | 400,000 |
+| Features | 39 |
 
-Immediate threshold tuning on the existing saved model:
+Threshold tuning on the leakage-safe saved model:
 
 | Threshold Strategy | Threshold | Precision | Recall | F1 |
 |---|---:|---:|---:|---:|
-| Default | 0.500000 | 0.8009 | 0.5333 | 0.6402 |
-| Max F1 | 0.346990 | 0.6283 | 0.7765 | 0.6946 |
-| Business operating | 0.400000 | 0.6764 | 0.7013 | 0.6886 |
-| Recall target 70% | 0.400645 | 0.6772 | 0.7000 | 0.6884 |
+| Default | 0.500000 | 0.7942 | 0.7601 | 0.7767 |
+| Max F1 | 0.470006 | 0.7724 | 0.7845 | 0.7784 |
+| Business operating | 0.400000 | 0.7209 | 0.8359 | 0.7742 |
+| Recall target 70% | 0.564424 | 0.8418 | 0.7000 | 0.7644 |
 
 The selected operating threshold is saved in
 `model_outputs/decision_threshold_config.json` and consumed by the API and
-AR queue logic. The business operating threshold is rounded to 0.40 for
-client explainability and a more workable AR review volume.
+AR queue logic. The business operating threshold is 0.40 to prioritize
+recall because the cost of missing high-value underpayment candidates is
+higher than the cost of extra review. This creates a larger review queue:
+3,564,981 underpaid rows, or 58.9% of the queue, are scored above the
+operating threshold, with about 28% expected false positives at the model
+precision shown above.
 
 ## Regression Validation
 
@@ -88,9 +92,9 @@ the primary expected-payment engine.
 
 | Model | MAE | RMSE | R2 | Median AE |
 |---|---:|---:|---:|---:|
-| HistGradientBoosting Regressor | 14.4837 | 53.2043 | 0.9268 | 5.9604 |
+| HistGradientBoosting Regressor | 14.5420 | 52.7397 | 0.9281 | 6.0419 |
 | CMS Formula Benchmark | 28.0693 | 99.3812 | 0.7446 | 9.2193 |
-| Linear Regression | 29.3444 | 109.8266 | 0.6881 | 14.7132 |
+| Linear Regression | 29.0328 | 108.6126 | 0.6950 | 14.8625 |
 
 The regression result is a validation cross-check, not a replacement for
 the CMS formula benchmark or payer-contract adjudication.
@@ -101,8 +105,8 @@ the CMS formula benchmark or payer-contract adjudication.
 not a client-ready recoverable amount. Step 09 now flags severe surgical
 HCPCS gaps that may be modifier/pricing artifacts because the PUF does not
 include modifiers 54/55/56, bilateral adjustment, assistant-surgeon, or
-MPPR detail. Report both gross and modifier-review-excluded totals after
-rerunning the pipeline.
+MPPR detail. Both gross and modifier-review-excluded totals are reported
+below.
 
 | Metric | Value |
 |---|---:|
@@ -110,6 +114,7 @@ rerunning the pipeline.
 | Underpaid queue rows | 6,056,133 |
 | Model scored rows | 6,056,133 |
 | Rule fallback rows | 0 |
+| Predicted high priority rows | 3,564,981 |
 | Total estimated recovery | $14,993,979,972.64 |
 | Modifier-review rows, existing-artifact audit | 9,048 |
 | Modifier-review estimated recovery, existing-artifact audit | $2,270,364,614.98 |
@@ -144,8 +149,12 @@ Isolation Forest was used to find unusual underpayment patterns across state, pr
 | Input rows | 7,678,091 |
 | Groups formed | 391,005 |
 | Groups scored | 57,308 |
-| Anomaly patterns | 5,491 |
-| Anomaly rate | 9.5816% |
+| Anomaly patterns | 5,731 |
+| Anomaly rate | 10.0003% |
+
+The highest-scored anomaly patterns are concentrated in HCPCS 66984
+cataract-related rows, consistent with the surgical/modifier artifact audit
+called out in the AR queue and underpayment report.
 
 ## Demo App
 

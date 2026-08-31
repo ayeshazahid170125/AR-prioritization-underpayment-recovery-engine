@@ -1,5 +1,3 @@
-
-
 # AR Prioritization & Underpayment Recovery Engine
 
 Public-data Medicare recovery engine for expected payment benchmarking, underpayment variance detection, and AR queue prioritization.
@@ -7,6 +5,9 @@ Public-data Medicare recovery engine for expected payment benchmarking, underpay
 <div align="center">
 
 <img src="assets/workflow-diagram.png" alt="AR Prioritization and Underpayment Recovery Engine workflow" width="920" />
+
+</div>
+
 ---
 
 ## Overview
@@ -119,7 +120,6 @@ Large raw CMS/RVU files, model binaries, and generated multi-million-row CSVs ar
 
 ---
 
-
 ## Run Locally
 
 **Prerequisites:** Python 3.11 or 3.12, Node.js LTS (includes `npm`)
@@ -138,8 +138,3 @@ The app starts:
 The legacy Streamlit dashboard is still available at `app/step13_dashboard.py` (install `requirements-streamlit-legacy.txt` separately to run it).
 
 For Vercel deployment, deploy `frontend/` as the frontend project and set `VITE_API_BASE_URL` to the hosted FastAPI URL. Host the FastAPI service separately on Render, Railway, AWS, Azure, GCP, or another Python web host.
-
----
-
-
-
